@@ -3,27 +3,42 @@ plugins {
 }
 
 group = 'net.portswigger'
-version = '1.1.2'
+version = '1.2.2'
 
 repositories {
     mavenLocal()
     mavenCentral()
 }
 
+java {
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+}
+
 dependencies {
-    compileOnly 'net.portswigger.burp.extensions:montoya-api:2023.10.3'
+    compileOnly "net.portswigger.burp.extensions:montoya-api:${extender_version}"
 
     implementation (
             'org.python:jython-standalone:2.7.3',
             'com.fifesoft:rsyntaxtextarea:3.3.4'
     )
+
+    testImplementation(
+            "net.portswigger.burp.extensions:montoya-api:${extender_version}",
+            'org.junit.jupiter:junit-jupiter:5.10.1',
+            'org.assertj:assertj-core:3.24.2',
+            'org.mockito:mockito-core:5.8.0'
+    )
 }
 
-tasks.register('fatJar', Jar) {
+test {
+    useJUnitPlatform()
+}
+
+jar {
     manifest {
         attributes 'implementation-version': "${version}"
     }
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
-    from { configurations.compileClasspath.collect { it.isDirectory() ? it : zipTree(it) } }
-    with jar
+    from { configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) } }
 }

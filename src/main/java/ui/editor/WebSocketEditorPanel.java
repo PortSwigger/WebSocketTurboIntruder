@@ -1,44 +1,42 @@
 package ui.editor;
 
-import attack.AttackHandler;
-import burp.WebSocketFuzzer;
-import burp.api.montoya.http.message.requests.HttpRequest;
-import burp.api.montoya.persistence.Persistence;
-import burp.api.montoya.ui.Theme;
+import attack.AttackStarter;
 import burp.api.montoya.ui.UserInterface;
-import burp.api.montoya.ui.contextmenu.WebSocketMessage;
 import burp.api.montoya.ui.editor.HttpRequestEditor;
 import burp.api.montoya.ui.editor.WebSocketMessageEditor;
+import config.FileLocationConfiguration;
+import data.AttackDetails;
+import data.InitialWebSocketMessage;
 import logger.Logger;
 import org.fife.ui.rsyntaxtextarea.RSyntaxTextArea;
-import org.fife.ui.rsyntaxtextarea.SyntaxConstants;
 import org.fife.ui.rtextarea.RTextScrollPane;
+import script.Script;
+import script.ScriptLoaderFacade;
+import ui.PanelSwitcher;
 
 import javax.swing.*;
+import javax.swing.text.JTextComponent;
 import java.awt.*;
+import java.awt.event.ComponentAdapter;
+import java.awt.event.ComponentEvent;
 import java.io.File;
-import java.io.IOException;
-import java.io.InputStream;
-import java.net.URI;
-import java.net.URISyntaxException;
-import java.net.URL;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.*;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.stream.Stream;
+
+import static java.awt.EventQueue.invokeLater;
+import static javax.swing.JFileChooser.APPROVE_OPTION;
+import static javax.swing.JFileChooser.DIRECTORIES_ONLY;
+import static javax.swing.JOptionPane.ERROR_MESSAGE;
+import static javax.swing.JOptionPane.showMessageDialog;
+import static javax.swing.JSplitPane.HORIZONTAL_SPLIT;
+import static javax.swing.JSplitPane.VERTICAL_SPLIT;
 
 public class WebSocketEditorPanel extends JPanel
 {
-    private final Logger logger;
     private final UserInterface userInterface;
-    private final Persistence persistence;
-    private final CardLayout cardLayout;
-    private final JPanel cardDeck;
-    private final AttackHandler attackHandler;
-    private final WebSocketMessage originalWebSocketMessage;
-    private JComboBox<Path> scriptComboBox;
+    private final InitialWebSocketMessage originalWebSocketMessage;
+    private final ThemeAwareRSTAFactory rstaFactory;
+    private final WebSocketEditorController controller;
+
+    private JComboBox<Script> scriptComboBox;
     private WebSocketMessageEditor webSocketsMessageEditor;
     private HttpRequestEditor upgradeHttpMessageEditor;
     private JSpinner numberOfThreadsSpinner;
@@ -46,32 +44,36 @@ public class WebSocketEditorPanel extends JPanel
     public WebSocketEditorPanel(
             Logger logger,
             UserInterface userInterface,
-            Persistence persistence,
-            CardLayout cardLayout,
-            JPanel cardDeck,
-            AttackHandler attackHandler,
-            WebSocketMessage originalWebSocketMessage)
+            FileLocationConfiguration fileLocationConfiguration,
+            AttackStarter attackStarter,
+            InitialWebSocketMessage originalWebSocketMessage,
+            PanelSwitcher panelSwitcher
+    )
     {
-        this.logger = logger;
+        super(new BorderLayout());
+
         this.userInterface = userInterface;
-        this.persistence = persistence;
-        this.cardLayout = cardLayout;
-        this.cardDeck = cardDeck;
-        this.attackHandler = attackHandler;
         this.originalWebSocketMessage = originalWebSocketMessage;
+        ScriptLoaderFacade scriptLoader = new ScriptLoaderFacade(fileLocationConfiguration);
+        this.rstaFactory = new ThemeAwareRSTAFactory(userInterface, logger);
 
-        this.setLayout(new BorderLayout());
+        controller = new WebSocketEditorController(attackStarter, panelSwitcher, fileLocationConfiguration, scriptLoader);
 
-        initComponents();
-    }
+        JSplitPane editableEditors = new JSplitPane(HORIZONTAL_SPLIT, getWebSocketMessageEditor(), getUpgradeHttpMessageEditor());
 
-    private void initComponents()
-    {
-        JSplitPane editableEditors = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, getWebSocketMessageEditor(), getUpgradeHttpMessageEditor());
-        editableEditors.setResizeWeight(0.5);
+        JSplitPane splitPane = new JSplitPane(VERTICAL_SPLIT, editableEditors, getPythonCodeEditor());
 
-        JSplitPane splitPane = new JSplitPane(JSplitPane.VERTICAL_SPLIT, editableEditors, getPythonCodeEditor());
-        splitPane.setResizeWeight(0.3);
+        addComponentListener(new ComponentAdapter() {
+            @Override
+            public void componentResized(ComponentEvent e) {
+                if (getWidth() > 0) {
+                    editableEditors.setDividerLocation(0.5);
+                    invokeLater(() -> splitPane.setDividerLocation(0.3));
+
+                    removeComponentListener(this);
+                }
+            }
+        });
 
         this.add(splitPane, BorderLayout.CENTER);
     }
@@ -79,7 +81,7 @@ public class WebSocketEditorPanel extends JPanel
     private Component getWebSocketMessageEditor()
     {
         webSocketsMessageEditor = userInterface.createWebSocketMessageEditor();
-        webSocketsMessageEditor.setContents(originalWebSocketMessage.payload());
+        webSocketsMessageEditor.setContents(originalWebSocketMessage.message());
 
         return webSocketsMessageEditor.uiComponent();
     }
@@ -98,46 +100,20 @@ public class WebSocketEditorPanel extends JPanel
 
         panel.add(getButtonPanel(), BorderLayout.NORTH);
 
-        RSyntaxTextArea rSyntaxTextArea = getRSyntaxTextArea();
+        RSyntaxTextArea rSyntaxTextArea = rstaFactory.build();
         RTextScrollPane scrollableCodeEditor = new RTextScrollPane(rSyntaxTextArea);
 
-        scriptComboBox.addActionListener(l -> {
-            Path path = scriptComboBox.getItemAt(scriptComboBox.getSelectedIndex());
+        Script script = scriptComboBox.getItemAt(scriptComboBox.getSelectedIndex());
+        String content = script == null ? "" : script.content();
 
-            if (!path.toString().contains(".py"))
-            {
-                rSyntaxTextArea.setText(null);
-            }
-            else if (path.toString().startsWith(WebSocketFuzzer.DEFAULT_SCRIPT_DIRECTORY))
-            {
-                String data = null;
+        rSyntaxTextArea.setText(content);
 
-                try (InputStream stream = WebSocketEditorPanel.class.getResourceAsStream(path.toString()))
-                {
-                    if (stream != null)
-                    {
-                        data = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
-                    }
-                } catch (IOException e)
-                {
-                    throw new RuntimeException(e);
-                }
+        scriptComboBox.addActionListener(l ->
+        {
+            Script newScript = scriptComboBox.getItemAt(scriptComboBox.getSelectedIndex());
+            String newContent = newScript == null ? "" : newScript.content();
 
-                rSyntaxTextArea.setText(data);
-            }
-            else
-            {
-                String content;
-                try
-                {
-                    content = Files.readString(path);
-                } catch (IOException e)
-                {
-                    throw new RuntimeException(e);
-                }
-
-                rSyntaxTextArea.setText(content);
-            }
+            rSyntaxTextArea.setText(newContent);
         });
 
         scrollableCodeEditor.setLineNumbersEnabled(true);
@@ -154,7 +130,7 @@ public class WebSocketEditorPanel extends JPanel
     {
         JPanel buttonPanel = new JPanel();
 
-        scriptComboBox = getScriptComboBox();
+        scriptComboBox = new JComboBox<>(controller.loadScripts());
         buttonPanel.add(scriptComboBox);
 
         JButton selectScriptsDirectoryButton = getScriptsDirectoryButton();
@@ -170,151 +146,52 @@ public class WebSocketEditorPanel extends JPanel
         return buttonPanel;
     }
 
-    private JComboBox<Path> getScriptComboBox()
-    {
-        List<Path> pathList = getPathList();
-
-        return new JComboBox<>(pathList.toArray(Path[]::new));
-    }
-
-    private List<Path> getPathList()
-    {
-        String websocketScriptsPath = persistence.preferences().getString("websocketsScriptsPath");
-        List<Path> pathList = new ArrayList<>();
-
-        if (WebSocketFuzzer.DEFAULT_SCRIPT_DIRECTORY.equals(websocketScriptsPath))
-        {
-            URL url = WebSocketEditorPanel.class.getResource(websocketScriptsPath);
-            if (url != null)
-            {
-                Stream<Path> stream  = null;
-                try
-                {
-                    URI uri = url.toURI();
-
-                    try (FileSystem fs = FileSystems.newFileSystem(uri, new HashMap<>())) {
-                        stream = Files.walk(Paths.get(uri));
-
-                        stream.forEach(pathList::add);
-                    }
-                } catch (IOException | URISyntaxException e)
-                {
-                    throw new RuntimeException(e);
-                } finally
-                {
-                    if (stream != null)
-                    {
-                        stream.close();
-                    }
-                }
-            }
-        }
-        else
-        {
-            try (Stream<Path> stream = Files.walk(Paths.get(websocketScriptsPath)))
-            {
-                stream.forEach(pathList::add);
-            } catch (IOException e)
-            {
-                throw new RuntimeException(e);
-            }
-        }
-        return pathList;
-    }
-
     private JButton getScriptsDirectoryButton()
     {
         JButton selectScriptsDirectoryButton = new JButton("Choose scripts directory");
-        selectScriptsDirectoryButton.addActionListener(l -> {
+        selectScriptsDirectoryButton.addActionListener(l ->
+        {
             JFileChooser scriptsFileChooser = new JFileChooser();
-            scriptsFileChooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
+            scriptsFileChooser.setFileSelectionMode(DIRECTORIES_ONLY);
 
             int option = scriptsFileChooser.showOpenDialog(this);
 
-            if (option == JFileChooser.APPROVE_OPTION)
+            if (option == APPROVE_OPTION)
             {
                 File file = scriptsFileChooser.getSelectedFile();
-                persistence.preferences().setString("websocketsScriptsPath", file.getAbsolutePath());
+                Script[] scripts = controller.loadScripts(file);
 
-                int originalSize = scriptComboBox.getItemCount();
-
-                List<Path> pathList = getPathList();
-
-                for (Path path : pathList)
-                {
-                    scriptComboBox.addItem(path);
-                }
-
-                for (int i=0; i < originalSize; i++)
-                {
-                    scriptComboBox.removeItemAt(0);
-                }
+                scriptComboBox.setModel(new DefaultComboBoxModel<>(scripts));
             }
         });
 
         return selectScriptsDirectoryButton;
     }
 
-    private RSyntaxTextArea getRSyntaxTextArea()
-    {
-        javax.swing.text.JTextComponent.removeKeymap("RTextAreaKeymap");
-        UIManager.put("RTextAreaUI.inputMap", null);
-        UIManager.put("RTextAreaUI.actionMap", null);
-        UIManager.put("RSyntaxTextAreaUI.inputMap", null);
-        UIManager.put("RSyntaxTextAreaUI.actionMap", null);
-
-        RSyntaxTextArea codeEditor = new RSyntaxTextArea(20, 60);
-
-        codeEditor.setEditable(true);
-        codeEditor.setSyntaxEditingStyle(SyntaxConstants.SYNTAX_STYLE_PYTHON);
-        codeEditor.setAntiAliasingEnabled(true);
-        codeEditor.setAutoIndentEnabled(true);
-        codeEditor.setPaintTabLines(true);
-        codeEditor.setTabSize(4);
-        codeEditor.setTabsEmulated(true);
-        codeEditor.setEOLMarkersVisible(false);
-        codeEditor.setWhitespaceVisible(false);
-
-        if (userInterface.currentTheme() == Theme.DARK)
-        {
-            try
-            {
-                org.fife.ui.rsyntaxtextarea.Theme rSyntaxTextAreaTheme = org.fife.ui.rsyntaxtextarea.Theme.load(getClass().getResourceAsStream("/org/fife/ui/rsyntaxtextarea/themes/dark.xml"));
-                rSyntaxTextAreaTheme.apply(codeEditor);
-            }
-            catch (IOException e)
-            {
-                logger.logError("Unable to apply dark theme.");
-            }
-        }
-
-        return codeEditor;
-    }
-
-    private JButton getAttackButton(RSyntaxTextArea rSyntaxTextArea)
+    private JButton getAttackButton(JTextComponent scriptTextComponent)
     {
         JButton attackButton = new JButton("Attack");
-        attackButton.addActionListener(l -> {
-            String payload = webSocketsMessageEditor.getContents().toString();
-            HttpRequest upgradeRequest = upgradeHttpMessageEditor.getRequest();
+        attackButton.addActionListener(l ->
+        {
+            AttackDetails attackDetails = new AttackDetails(
+                    (int) numberOfThreadsSpinner.getValue(),
+                    webSocketsMessageEditor.getContents().toString(),
+                    upgradeHttpMessageEditor.getRequest(),
+                    scriptTextComponent.getText()
+            );
 
-            String jythonCode = rSyntaxTextArea.getText();
-
-            new Thread(() -> {
-                try
-                {
-                    attackHandler.executeJython(payload, upgradeRequest, jythonCode);
-                }
-                catch (Exception e)
-                {
-                    JOptionPane.showMessageDialog(this, "Jython code error. Please review.\r\n" + e, "Error", JOptionPane.ERROR_MESSAGE);
-                    logger.logError("Jython code error. Please review.\r\n" + e);
-                }
-            }).start();
-
-            attackHandler.startConsumers((int) numberOfThreadsSpinner.getValue());
-
-            SwingUtilities.invokeLater(() -> cardLayout.show(cardDeck, "attackPanel"));
+            try
+            {
+                controller.startAttack(attackDetails);
+            } catch (Exception e)
+            {
+                showMessageDialog(
+                        this,
+                        "Jython code error. Please review.\n" + e.getMessage(),
+                        "Error",
+                        ERROR_MESSAGE
+                );
+            }
         });
 
         return attackButton;
